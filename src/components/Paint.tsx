@@ -117,8 +117,6 @@ function Paint(props: PaintProps) {
 
         debug('rerendering canvas');
 
-        drawAllCurvesFromStack(context, stack,
-                               props.smoothness, props.thinning);
         drawFromBuffer(context, canvas, canvasOffset, buffer);
     }, [canvas]);
 
@@ -131,6 +129,11 @@ function Paint(props: PaintProps) {
 
         setSelfStore(true);
         storage.setItem('stack', JSON.stringify(stack));
+        debug('stackdata length:');
+        debug(buffer.toDataURL().length);
+        storage.setItem('canvas', buffer.toDataURL());
+        debug('canvasdata length:');
+        debug(buffer.toDataURL().length);
         storage.setItem('most_recent', Date.now().toString());
     }, [stack]);
 
@@ -140,7 +143,19 @@ function Paint(props: PaintProps) {
         debug('registering listeners');
 
         const localStack: CoordPath[] = JSON.parse(window.localStorage.getItem('stack')) || [];
-        if (localStack.length > 0) {
+        const localCanvasData: string = window.localStorage.getItem('canvas');
+
+        if (localCanvasData) {
+            const canvasImg = new Image;
+            canvasImg.onload = () => {
+                debug('drawing local image');
+                debug(localCanvasData.length);
+                bufferContext.clearRect(0, 0, buffer.width, buffer.height);
+                bufferContext.drawImage(canvasImg, 0, 0);
+            };
+            canvasImg.src = localCanvasData;
+            drawFromBuffer(context, canvas, canvasOffset, buffer);
+        } else if (localStack.length > 0) {
             setStack(localStack);
             drawAllCurvesFromStack(bufferContext, localStack, props.smoothness, props.thinning);
             drawFromBuffer(context, canvas, canvasOffset, buffer);
@@ -279,10 +294,11 @@ function Paint(props: PaintProps) {
                         const bounds = canvas.getBoundingClientRect();
 
                         // Calculate the mouse position relative to the buffer
-                        mousePos.current = { x: e.clientX - bounds.left + canvasOffset.x,
-                                             y: e.clientY - bounds.top  + canvasOffset.y};
+                        mousePos.current = { x: e.clientX - bounds.left,
+                                             y: e.clientY - bounds.top };
                         isDrawing.current = true;
-                        currentCoordPath.current.pos = [ mousePos.current ];
+                        currentCoordPath.current.pos = [ { x: mousePos.current.x + canvasOffset.x,
+                                                           y: mousePos.current.y + canvasOffset.y } ];
                         coordPathLen.current = 0;
                         debug('start draw: ' + mousePos.current.x + ', ' + mousePos.current.y);
                         setCanUndo(false);
@@ -307,11 +323,7 @@ function Paint(props: PaintProps) {
                         if (currentCoordPath.current.pos.length == 0) return;
 
                         // Rerendering the whole stack is expensive, so do this only if explicitly directed.
-                        if (props.rerenderAll) {
-                            debug('rerendering previous strokes');
-                            bufferContext.clearRect(0, 0, buffer.width, buffer.height);
-                            drawAllCurvesFromStack(bufferContext, stack, props.smoothness, props.thinning);
-                        } else {
+                        if (!props.rerenderAll) {
                             debug('erasing stroke');
                             undrawLineFromCoordPath(bufferContext, currentCoordPath.current);
                         }
@@ -353,18 +365,20 @@ function Paint(props: PaintProps) {
                             canvas.style.cursor = 'grabbing';
                             const movement = { x: e.movementX, y: e.movementY };
                             panCanvas(canvas, buffer, canvasOffset, movement);
+                            drawFromBuffer(context, canvas, canvasOffset, buffer);
                         } else {
                             // const canvas = canvasRef.current;
                             const bounds = canvas.getBoundingClientRect();
                             const bufferContext = buffer.getContext('2d');
 
                             if (isDrawing.current) {
-                                const end: Coord = { x: e.clientX - bounds.left + canvasOffset.x,
-                                                     y: e.clientY - bounds.top  + canvasOffset.y};
-                                bufferContext.strokeStyle = currentCoordPath.current.color;
-                                drawLine(bufferContext, mousePos.current, end, currentCoordPath.current.width);
+                                const end: Coord = { x: e.clientX - bounds.left,
+                                                     y: e.clientY - bounds.top };
+                                context.strokeStyle = currentCoordPath.current.color;
+                                drawLine(context, mousePos.current, end, currentCoordPath.current.width);
 
-                                currentCoordPath.current.pos.push(end);
+                                currentCoordPath.current.pos.push({ x: end.x + canvasOffset.x, 
+                                                                    y: end.y + canvasOffset.y });
                                 coordPathLen.current += distance(mousePos.current, end);
 
                                 if (props.maxStrokeLen && coordPathLen.current >= props.maxStrokeLen) {
@@ -376,7 +390,6 @@ function Paint(props: PaintProps) {
                                 mousePos.current = end;
                             }
                         }
-                        drawFromBuffer(context, canvas, canvasOffset, buffer);
                     }}
                     onMouseLeave = {e => {
                         if (isDrawing.current)
@@ -386,22 +399,98 @@ function Paint(props: PaintProps) {
                     }}
                     onTouchStart = {e => {
                         e.preventDefault();
-                        touchPos.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+
+                        const bounds = canvas.getBoundingClientRect();
+                        touchPos.current = { x: e.touches[0].clientX - bounds.left,
+                                             y: e.touches[0].clientY - bounds.top };
+                        if (cannotDraw) {
+                            isPanning.current = true;
+                            debug('start pan');
+                            return;
+                        }
+
+                        isDrawing.current = true;
+                        currentCoordPath.current.pos = [ { x: touchPos.current.x + canvasOffset.x,
+                                                           y: touchPos.current.y + canvasOffset.y } ];
+                        coordPathLen.current = 0;
+                        debug('start draw: ' + touchPos.current.x + ', ' + touchPos.current.y);
+                        setCanUndo(false);
                     }}
                     onTouchEnd = {e => {
                         e.preventDefault();
+                        if (cannotDraw) {
+                            isPanning.current = false;
+                            debug('finished pan');
+                            return;
+                        }
+
+                        const bufferContext = buffer.getContext('2d');
+
+                        touchPos.current = { x: 0, y: 0 }
+                        isDrawing.current = false;
+
+                        debug('finished draw');
+                        if (currentCoordPath.current.pos.length == 0) return;
+
+                        if (!props.rerenderAll) {
+                            debug('erasing stroke');
+                            undrawLineFromCoordPath(bufferContext, currentCoordPath.current);
+                        }
+
+                        const data: CoordPath = {
+                            pos: currentCoordPath.current.pos,
+                            width: currentCoordPath.current.width,
+                            color: currentCoordPath.current.color
+                        };
+                        debug('sending stroke to server');
+                        SocketUtils.sendStroke(data);
+                        setCanUndo(true);
+                        debug('draw curve');
+                        drawCurveFromCoordPath(bufferContext, currentCoordPath.current,
+                                               props.smoothness, props.thinning);
+
+                        debug('updating stack');
+                        setStack(prevStack => [...prevStack, data]);
+
+                        // Reset the path
+                        currentCoordPath.current.pos = []
+                        debug('redrawing buffer');
+                        drawFromBuffer(context, canvas, canvasOffset, buffer);
                     }}
                     onTouchMove = {e => {
                         e.preventDefault();
-                        const lastTouchPos: Coord = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-                        const deltaX = lastTouchPos.x - touchPos.current.x;
-                        const deltaY = lastTouchPos.y - touchPos.current.y;
+
+                        const bounds = canvas.getBoundingClientRect();
+                        const lastTouchPos: Coord = { x: e.touches[0].clientX - bounds.left,
+                                                      y: e.touches[0].clientY - bounds.top };
+
+                        if (cannotDraw && isPanning.current) {
+                            const deltaX = lastTouchPos.x - touchPos.current.x;
+                            const deltaY = lastTouchPos.y - touchPos.current.y;
+
+                            const movement = { x: deltaX, y: deltaY };
+
+                            panCanvas(canvas, buffer, canvasOffset, movement);
+                            drawFromBuffer(context, canvas, canvasOffset, buffer);
+                        } else {
+                            const bufferContext = buffer.getContext('2d');
+
+                            if (isDrawing.current) {
+                                context.strokeStyle = currentCoordPath.current.color;
+                                drawLine(context, touchPos.current, lastTouchPos, currentCoordPath.current.width);
+
+                                currentCoordPath.current.pos.push({ x: lastTouchPos.x + canvasOffset.x,
+                                                                    y: lastTouchPos.y + canvasOffset.y });
+                                coordPathLen.current += distance(touchPos.current, lastTouchPos);
+
+                                if (props.maxStrokeLen && coordPathLen.current >= props.maxStrokeLen) {
+                                    debug('stroke too long; terminating');
+                                    canvas.dispatchEvent(new TouchEvent('touchend'));
+                                }
+                            }
+                        }
+
                         touchPos.current = lastTouchPos;
-
-                        const movement = { x: deltaX, y: deltaY };
-
-                        panCanvas(canvas, buffer, canvasOffset, movement);
-                        drawFromBuffer(context, canvas, canvasOffset, buffer);
                     }}
                     onWheel={e => {
                         // TODO: Use e.deltaY to zoom into the canvas?

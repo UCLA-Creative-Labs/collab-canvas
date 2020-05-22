@@ -32,7 +32,8 @@ module.exports = merge(common, {
         ]
     },
     optimization: {
-        runtimeChunk: 'single',
+        runtimeChunk: 'multiple',
+        usedExports: true,
         splitChunks: {
             cacheGroups: {
                 vendor: {
